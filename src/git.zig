@@ -31,6 +31,39 @@ pub fn currentCommit(gpa: std.mem.Allocator, io: std.Io) ![]const u8 {
     return try gpa.dupe(u8, run.stdout[0..8]);
 }
 
+// Not code you wrote: deps, build output, lockfiles, data dumps, notebooks
+const excludes: []const []const u8 = &.{
+    ":(glob,exclude)**/node_modules/**",
+    ":(glob,exclude)**/bower_components/**",
+    ":(glob,exclude)**/vendor/**",
+    ":(glob,exclude)**/venv/**",
+    ":(glob,exclude)**/.venv/**",
+    ":(glob,exclude)**/env/**",
+    ":(glob,exclude)**/site-packages/**",
+    ":(glob,exclude)**/__pycache__/**",
+    ":(glob,exclude)**/.ipynb_checkpoints/**",
+    ":(glob,exclude)**/dist/**",
+    ":(glob,exclude)**/build/**",
+    ":(glob,exclude)**/out/**",
+    ":(glob,exclude)**/.next/**",
+    ":(glob,exclude)**/coverage/**",
+    ":(glob,exclude)**/.idea/**",
+    ":(glob,exclude)**/.vscode/**",
+    ":(glob,exclude)**/package-lock.json",
+    ":(glob,exclude)**/npm-shrinkwrap.json",
+    ":(glob,exclude)**/pnpm-lock.yaml",
+    ":(glob,exclude)**/*.lock",
+    ":(glob,exclude)**/*.lockb",
+    ":(glob,exclude)**/*.min.js",
+    ":(glob,exclude)**/*.min.css",
+    ":(glob,exclude)**/*.map",
+    ":(glob,exclude)**/*.csv",
+    ":(glob,exclude)**/*.tsv",
+    ":(glob,exclude)**/*.ipynb",
+    ":(glob,exclude)**/*.parquet",
+    ":(glob,exclude)**/*.xlsx",
+};
+
 pub fn getLinesChanged(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -83,6 +116,8 @@ pub fn getLinesChanged(
             "--pretty=tformat:",
         },
         email_args,
+        &.{"--", "."},
+        excludes,
     });
     const log = try std.process.run(allocator, io, .{ .argv = log_args });
     switch (log.term) {

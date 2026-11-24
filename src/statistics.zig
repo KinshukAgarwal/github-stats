@@ -214,13 +214,15 @@ fn getBasicInfo(client: *HttpClient, arena: *std.heap.ArenaAllocator) !struct {
         std.log.err("Failed to get user emails. " ++
             "Token may be missing `user:email` permission.", .{});
     }
-    if (emails.len == 0) {
-        emails = try arena.allocator().alloc([]const u8, 1);
-        emails[0] = try std.fmt.allocPrint(
-            arena.allocator(),
-            "{s}@users.noreply.github.com",
-            .{parsed.login},
-        );
+    // git --author is a regex on "Name <email>": also match login and display
+    // name so commits made with any email get counted
+    {
+        const extra: usize = if (parsed.name != null) 2 else 1;
+        const all = try arena.allocator().alloc([]const u8, emails.len + extra);
+        @memcpy(all[0..emails.len], emails);
+        all[emails.len] = parsed.login;
+        if (parsed.name) |n| all[emails.len + 1] = n;
+        emails = all;
     }
 
     return .{
@@ -552,6 +554,7 @@ fn getRepos(
     return result;
 }
 
+// Always count locally with git (API can't exclude build/data files)
 fn getLinesChanged(
     self: *Statistics,
     arena: *std.heap.ArenaAllocator,
@@ -559,97 +562,22 @@ fn getLinesChanged(
     client: *HttpClient,
     max_retries: ?usize,
 ) !void {
-    const allocator = arena.allocator();
-    const T = struct {
-        repo: *Repository,
-        delay: i64,
-        timestamp: i64,
-        retries: usize,
-    };
-    var q: std.PriorityQueue(T, void, struct {
-        pub fn compareFn(_: void, lhs: T, rhs: T) std.math.Order {
-            return std.math.order(lhs.timestamp, rhs.timestamp);
-        }
-    }.compareFn) = .empty;
-    defer q.deinit(allocator);
+    _ = max_retries;
     for (self.repositories) |*repo| {
-        if (repo.lines_changed > 0) {
-            continue;
-        }
-        try q.push(allocator, .{
-            .repo = repo,
-            .delay = 0,
-            .timestamp = std.Io.Clock.real.now(io).toSeconds(),
-            .retries = 0,
+        repo.lines_changed = git.getLinesChanged(
+            arena.allocator(),
+            io,
+            self.user,
+            client.token,
+            repo.name,
+            self.emails,
+        ) catch |e| switch (e) {
+            error.GitNotInstalled => 0,
+            else => return e,
+        };
+        std.log.info("Got {d} lines changed by {s} in {s}", .{
+            repo.lines_changed, self.user, repo.name,
         });
-    }
-    while (q.pop()) |_item| {
-        var item = _item;
-        const now = std.Io.Clock.real.now(io).toSeconds();
-        if (item.timestamp > now) {
-            const delay = item.timestamp - now;
-            std.log.debug("Sleeping for {d}s. Waiting for {d} repo{s}.", .{
-                delay,
-                q.count() + 1,
-                if (q.count() + 1 != 0) "s" else "",
-            });
-            try io.sleep(.fromSeconds(delay), .real);
-        }
-        switch (try item.repo.getLinesChanged(arena, client, self.user)) {
-            .ok => {},
-            // If we're hitting rate limits on this API, just clone the repo
-            // locally to compute lines changed
-            // https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api?apiVersion=2026-03-10#rate-limit-errors
-            .accepted, .forbidden, .too_many_requests => {
-                item.timestamp =
-                    std.Io.Clock.real.now(io).toSeconds() + item.delay;
-                // Note: this actually works way better with a very short delay,
-                // hence no exponential backoff
-                const random: std.Random.IoSource = .{ .io = io };
-                item.delay = random.interface().intRangeAtMost(i64, 0, 4);
-                item.retries += 1;
-                if (max_retries) |max| {
-                    if (item.retries <= max) {
-                        try q.push(allocator, item);
-                    } else {
-                        std.log.info(
-                            "Cloning {s} to get lines changed...",
-                            .{item.repo.name},
-                        );
-                        item.repo.lines_changed = git.getLinesChanged(
-                            arena.allocator(),
-                            io,
-                            self.user,
-                            client.token,
-                            item.repo.name,
-                            self.emails,
-                        ) catch |e| switch (e) {
-                            error.GitNotInstalled => 0,
-                            else => return e,
-                        };
-                        std.log.info("Got {d} line{s} changed by {s} in {s}", .{
-                            item.repo.lines_changed,
-                            if (item.repo.lines_changed != 1) "s" else "",
-                            self.user,
-                            item.repo.name,
-                        });
-                    }
-                } else {
-                    try q.push(allocator, item);
-                }
-            },
-            else => |status| {
-                std.log.info(
-                    "Failed to get contribution data for {s} ({?s})",
-                    .{ item.repo.name, status.phrase() },
-                );
-                std.log.err(
-                    "Request failed with response {?s}",
-                    .{status.phrase()},
-                );
-                return error.RequestFailed;
-            },
-        }
     }
 }
 
